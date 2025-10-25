@@ -1,17 +1,982 @@
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Three.js App</title>
-  </head>
-  <body>
-    <!-- <div id="login-field-wrapper"> -->
-    <!--   <div class="login-form"> -->
-    <!--     <h2>Login</h2> -->
-    <!--     <form> -->
-    <!--       <input type="email" placeholder="Email" required> -->
-    <!--       <input type="password" placeholder="Password" required> -->
-    <!--       <button type="submit">Submit</button> -->
-    <!--     </form> -->
-    <!--   </div> -->
-    <!-- </div> -->
-    <script type="module" src="/src/main.js"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Tactical Grid Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #1f2937; }
+        #container { width: 100vw; height: 100vh; }
+        #info {
+            /* Top-right corner */
+            position: absolute; 
+            top: 10px; 
+            right: 10px; 
+            
+            padding: 10px 20px; background: rgba(0, 0, 0, 0.7); color: white;
+            border-radius: 8px; font-size: 14px; text-align: center;
+            z-index: 10;
+        }
+        #message { color: #facc15; font-weight: bold; margin-top: 5px; }
+        /* Style for the health display in info box */
+        #playerHealth { display: block; margin-bottom: 5px; } 
+
+        canvas { display: block; }
+        /* Style for the action buttons */
+        #controls {
+            position: absolute; bottom: 5vh; left: 50%; 
+            transform: translateX(-50%);
+            z-index: 10;
+            display: flex; 
+            min-width: 400px;
+        }
+        .control-button {
+            transition: all 0.15s ease-in-out;
+            cursor: pointer;
+            font-weight: bold;
+            border-radius: 0.75rem; 
+            padding: 0.75rem 1.5rem; 
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); 
+            width: 30%; /* Adjust width since we removed one button */
+            margin: 0 4px; /* Slight margin for spacing */
+        }
+        .control-button:hover:not(:disabled) {
+            transform: scale(1.05);
+        }
+        .control-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Specific button colors */
+        #moveButton { background-color: #4f46e5; color: white; } /* indigo-600 */
+        /* #skipMoveButton removed */
+        #attackButton { background-color: #dc2626; color: white; } /* red-600 */
+        #endTurnButton { background-color: #059669; color: white; } /* emerald-600 */
+
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="info">
+        3D Tactical Grid Demo (7x7 Isometric View)<br>
+        **P1 (Red) & P2 (Blue): Move (Rook). Attack (Full Grid) requires Cannon pickup (Single Use).**<br>
+        <span id="playerHealth">P1 Health: 10 | P2 Health: 10</span><br> <!-- Health Display -->
+        <span id="message">--- Player 1 (Red)'s turn! Select your unit. ---</span>
+    </div>
+    
+    <!-- Controls container is always visible, individual buttons are shown/hidden by JS -->
+    <div id="controls" class="space-x-4">
+        <button id="moveButton" class="control-button">Move</button>
+        <!-- Removed Skip Move button -->
+        <button id="attackButton" class="control-button">Attack</button>
+        <button id="endTurnButton" class="control-button">End Turn</button>
+    </div>
+
+    <script>
+        // --- Game Constants ---
+        const GRID_SIZE = 7;
+        const TILE_WIDTH = 5;
+        const TILE_HEIGHT = 0.2;
+        const TILE_GAP = 0.1;
+        const ORIGIN_COLOR = 0x10b981; // Green-600
+        const HOVER_COLOR = 0x93c5fd;  // Blue-300
+        const MOVE_HIGHLIGHT_COLOR = 0x6366f1; // Indigo-500 for valid moves
+        const ATTACK_HIGHLIGHT_COLOR = 0xfb923c; // Orange-400 for valid attacks
+        const MOVEMENT_DURATION = 300; // milliseconds for unit movement animation
+        
+        // Unit Constants
+        const UNIT_RADIUS = 1.5;
+        const PLAYER1_COLOR = 0xff0000; // Red
+        const PLAYER2_COLOR = 0x0000ff; // Blue
+        const SELECTED_UNIT_EMISSIVE = 0x808000; // Yellowish glow for selected unit
+        const ISOMETRIC_FRUSTUM_SIZE = 45;
+
+        // Cannon Constants for Animation
+        const CANNON_BALL_RADIUS = 0.5;
+        const CANNON_COLOR = 0x222222; // Dark gray/black
+        const CANNON_DURATION = 500; // milliseconds for cannon flight
+        const CANNON_ARC_HEIGHT = 10; // Peak height of the arc
+
+        // Cannon Item Constants
+        const CANNON_ITEM_COLOR = 0xf97316; // Orange-500
+        const CANNON_ITEM_SIZE = 1; // Small cube size
+
+        // Game/Unit Constants
+        const STARTING_HEALTH = 10;
+        const DAMAGE_AMOUNT = 1;
+
+        // --- Game Phase Constants (UPDATED for flexible order) ---
+        const PHASE_SELECT_UNIT = 'SELECT_UNIT';        
+        const PHASE_ACTION_CHOICE = 'ACTION_CHOICE';    // Unit selected, choose Move/Attack/End Turn
+        const PHASE_MOVE_TARGET = 'MOVE_TARGET';        // Targeting a move tile
+        const PHASE_ATTACK_TARGET = 'ATTACK_TARGET';    // Targeting an attack tile
+
+        // --- Three.js Setup Variables ---
+        let scene, camera, renderer;
+        let raycaster, pointer, tiles = [];
+        let tileMap = new Map();
+        let hoveredTile = null;
+
+        // --- Game State Variables ---
+        let player1, player2;
+        let allUnits = [];
+        let occupiedTiles = {};
+        let currentPlayer = 1;
+        let selectedUnit = null;
+        let selectedUnitMaterial = null;
+        let validTargetTiles = []; 
+        let gamePhase = PHASE_SELECT_UNIT;
+        // Turn state tracks action usage
+        let turnState = { hasMoved: false, hasAttacked: false }; 
+        let totalTurns = 0; // NEW: Global turn counter for spawning logic
+
+        // Cannon Items State (NEW: Use arrays/map for dynamic cannon tracking)
+        let cannonItems = [];      // Array to hold all active cannon meshes
+        let cannonPositions = {};  // Map key: "x,z", value: cannonMesh
+        
+        // --- Animation Variables ---
+        let isAnimating = false;
+        
+        // Unit Movement specific variables
+        let animationStartTime = 0;
+        let unitToAnimate = null;
+        let startPosition = new THREE.Vector3();
+        let endPosition = new THREE.Vector3();
+        let deferredTargetTile = null;
+
+        // Cannon Animation specific variables
+        let cannonBall = null;
+        let cannonStartTime = 0;
+        let cannonStartPosition = new THREE.Vector3();
+        let cannonEndPosition = new THREE.Vector3();
+        let cannonTargetTile = null; 
+
+        // --- Utility to get HTML elements ---
+        const messageElement = document.getElementById('message');
+        const moveButton = document.getElementById('moveButton');
+        const attackButton = document.getElementById('attackButton');
+        const endTurnButton = document.getElementById('endTurnButton');
+        const controlsDiv = document.getElementById('controls');
+        const playerHealthElement = document.getElementById('playerHealth');
+
+
+        /**
+         * Calculates the world position (X and Z) for the center of a given grid tile.
+         */
+        function getTileWorldXZ(gridX, gridZ) {
+            const totalSize = GRID_SIZE * (TILE_WIDTH + TILE_GAP) - TILE_GAP;
+            const offset = totalSize / 2 - TILE_WIDTH / 2;
+            const posX = gridX * (TILE_WIDTH + TILE_GAP) - offset;
+            const posZ = gridZ * (TILE_WIDTH + TILE_GAP) - offset;
+            return { posX, posZ };
+        }
+
+        /**
+         * Retrieves a tile mesh based on its grid coordinates.
+         */
+        function getTileByCoords(x, z) {
+            return tileMap.get(`${x},${z}`) || null;
+        }
+
+        /**
+         * Updates the visibility and state of the control buttons based on the game phase and turn state.
+         */
+        function updateControlVisibility() {
+            // Hide all buttons by default
+            moveButton.style.display = 'none';
+            attackButton.style.display = 'none';
+            endTurnButton.style.display = 'none';
+            
+            if (isAnimating || gamePhase === 'GAME_OVER' || selectedUnit === null) {
+                return; 
+            }
+
+            // Note: Updated unit description for message
+            const unitName = selectedUnit.userData.hasCannon ? 
+                'Rook-mover (Cannon Loaded)' : 
+                'Rook-mover (No Cannon)';
+            
+            if (gamePhase === PHASE_ACTION_CHOICE) {
+                // Always show End Turn once an action choice is possible
+                endTurnButton.style.display = 'block';
+
+                const canMove = !turnState.hasMoved;
+                const canAttack = !turnState.hasAttacked && selectedUnit.userData.hasCannon;
+
+                // Enable Move button if move hasn't been used
+                if (canMove) {
+                    moveButton.style.display = 'block';
+                }
+
+                // Enable Attack button if attack hasn't been used AND unit has a cannon
+                if (canAttack) {
+                    attackButton.style.display = 'block';
+                }
+                
+                let actionMessage = `Player ${currentPlayer}'s ${unitName} selected.`;
+                
+                if (canMove && canAttack) {
+                    actionMessage += " Choose Move, Attack, or End Turn.";
+                } else if (canMove && !canAttack) {
+                    actionMessage += " Move available. Must find a cannon to Attack. Choose Move or End Turn.";
+                } else if (!canMove && canAttack) {
+                    actionMessage += " Move used. Cannon loaded. Choose Attack or End Turn.";
+                } else { // Neither canMove nor canAttack
+                    actionMessage += " All actions used, or no cannon. Click End Turn.";
+                    moveButton.style.display = 'none';
+                    attackButton.style.display = 'none';
+                }
+                messageElement.textContent = actionMessage;
+            }
+        }
+
+        /**
+         * Updates the health display in the info box, highlighting the current player.
+         */
+        function updateHealthDisplay() {
+            const p1Health = player1 && player1.userData.isAlive ? player1.userData.health : 0;
+            const p2Health = player2 && player2.userData.isAlive ? player2.userData.health : 0;
+            
+            const p1Color = currentPlayer === 1 ? 'font-bold text-red-400' : 'text-white';
+            const p2Color = currentPlayer === 2 ? 'font-bold text-blue-400' : 'text-white';
+
+            playerHealthElement.innerHTML = 
+                `<span class="${p1Color}">P1 Health: ${p1Health}</span> | ` +
+                `<span class="${p2Color}">P2 Health: ${p2Health}</span>`;
+        }
+
+        /**
+         * Initializes the Three.js scene, camera, and renderer.
+         */
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1f2937);
+
+            const aspect = window.innerWidth / window.innerHeight;
+            camera = new THREE.OrthographicCamera(
+                ISOMETRIC_FRUSTUM_SIZE * aspect / -2, ISOMETRIC_FRUSTUM_SIZE * aspect / 2,
+                ISOMETRIC_FRUSTUM_SIZE / 2, ISOMETRIC_FRUSTUM_SIZE / -2,
+                1, 1000
+            );
+            camera.position.set(50, 50, 50);
+            
+            // --- LookAt target remains positive Y to push the board down on the screen ---
+            camera.lookAt(0, 10, 0); 
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+
+            raycaster = new THREE.Raycaster();
+            pointer = new THREE.Vector2();
+
+            createGrid();
+            createUnits(); 
+            initializeCannons(); // Initializes the game with the first two cannons
+            
+            // Set up button handlers
+            moveButton.addEventListener('click', onMoveSelectClick);
+            attackButton.addEventListener('click', onAttackSelectClick);
+            endTurnButton.addEventListener('click', onEndTurnClick);
+            
+            window.addEventListener('resize', onWindowResize, false);
+            renderer.domElement.addEventListener('mousemove', onPointerMove, false);
+            renderer.domElement.addEventListener('click', onPointerClick, false);
+            
+            updateControlVisibility(); 
+        }
+
+        /**
+         * Creates the grid of individual tiles (meshes).
+         */
+        function createGrid() {
+            const tileGeometry = new THREE.BoxGeometry(TILE_WIDTH, TILE_HEIGHT, TILE_WIDTH);
+
+            for (let x = 0; x < GRID_SIZE; x++) {
+                for (let z = 0; z < GRID_SIZE; z++) {
+                    const { posX, posZ } = getTileWorldXZ(x, z);
+
+                    const tileMaterial = new THREE.MeshLambertMaterial({ color: ORIGIN_COLOR });
+                    const tileMesh = new THREE.Mesh(tileGeometry, tileMaterial);
+                    tileMesh.position.set(posX, 0, posZ);
+
+                    tileMesh.userData = {
+                        isTile: true,
+                        gridX: x,
+                        gridZ: z,
+                        initialColor: new THREE.Color(ORIGIN_COLOR)
+                    };
+
+                    scene.add(tileMesh);
+                    tiles.push(tileMesh);
+                    tileMap.set(`${x},${z}`, tileMesh);
+                }
+            }
+        }
+
+        /**
+         * Adds player units (Octahedrons) to the grid, placing them at random positions 
+         * that are separated by a minimum distance of 3 tiles.
+         */
+        function createUnits() {
+            const unitGeometry = new THREE.OctahedronGeometry(UNIT_RADIUS);
+            const unitY = TILE_HEIGHT / 2 + UNIT_RADIUS;
+
+            // Helper function to get a random grid coordinate (0 to GRID_SIZE-1)
+            function getRandomCoord() {
+                return Math.floor(Math.random() * GRID_SIZE);
+            }
+            
+            // 1. Determine Player 1's starting position randomly
+            let p1X = getRandomCoord();
+            let p1Z = getRandomCoord();
+
+            // 2. Determine Player 2's starting position with minimum distance constraint
+            let p2X, p2Z;
+            const minDistance = 3;
+            let isValidPlacement = false;
+
+            while (!isValidPlacement) {
+                p2X = getRandomCoord();
+                p2Z = getRandomCoord();
+
+                // Check if the position is different
+                const isDifferent = (p2X !== p1X || p2Z !== p1Z);
+                
+                // Calculate Manhattan distance (distance in tiles along X and Z axes)
+                const distance = Math.abs(p2X - p1X) + Math.abs(p2Z - p1Z);
+                
+                // Check distance constraint
+                const meetsDistance = distance >= minDistance;
+
+                if (isDifferent && meetsDistance) {
+                    isValidPlacement = true;
+                }
+            }
+
+
+            // --- Player 1 (Red) at (p1X, p1Z) ---
+            const pos1 = getTileWorldXZ(p1X, p1Z);
+            const material1 = new THREE.MeshLambertMaterial({ color: PLAYER1_COLOR });
+            player1 = new THREE.Mesh(unitGeometry, material1);
+            player1.position.set(pos1.posX, unitY, pos1.posZ);
+            // NEW: hasCannon set to false initially
+            player1.userData = { isUnit: true, playerId: 1, currentTile: [p1X, p1Z], isAlive: true, health: STARTING_HEALTH, hasCannon: false }; 
+            scene.add(player1);
+
+            // --- Player 2 (Blue) at (p2X, p2Z) ---
+            const pos2 = getTileWorldXZ(p2X, p2Z);
+            const material2 = new THREE.MeshLambertMaterial({ color: PLAYER2_COLOR });
+            player2 = new THREE.Mesh(unitGeometry, material2);
+            player2.position.set(pos2.posX, unitY, pos2.posZ);
+            // NEW: hasCannon set to false initially
+            player2.userData = { isUnit: true, playerId: 2, currentTile: [p2X, p2Z], isAlive: true, health: STARTING_HEALTH, hasCannon: false }; 
+            scene.add(player2);
+            
+            allUnits.push(player1, player2);
+            occupiedTiles[`${p1X},${p1Z}`] = player1;
+            occupiedTiles[`${p2X},${p2Z}`] = player2;
+
+            updateHealthDisplay(); // Initial display update
+        }
+
+        /**
+         * Finds an unoccupied position (not occupied by units or other cannons).
+         */
+        function findUnoccupiedPosition() {
+            let x, z, key;
+            // Get all currently occupied keys (by units and other cannon items)
+            const occupiedKeys = new Set(Object.keys(occupiedTiles).concat(Object.keys(cannonPositions)));
+
+            do {
+                x = Math.floor(Math.random() * GRID_SIZE);
+                z = Math.floor(Math.random() * GRID_SIZE);
+                key = `${x},${z}`;
+            } while (occupiedKeys.has(key));
+            return { x, z, key };
+        }
+        
+        /**
+         * Places a single cannon item at a random unoccupied position.
+         */
+        function placeSingleCannon() {
+            const itemGeometry = new THREE.BoxGeometry(CANNON_ITEM_SIZE, CANNON_ITEM_SIZE, CANNON_ITEM_SIZE);
+            const itemMaterial = new THREE.MeshLambertMaterial({ color: CANNON_ITEM_COLOR });
+            const itemY = TILE_HEIGHT / 2 + CANNON_ITEM_SIZE / 2;
+
+            try {
+                const pos = findUnoccupiedPosition();
+                const worldPos = getTileWorldXZ(pos.x, pos.z);
+
+                const cannonMesh = new THREE.Mesh(itemGeometry, itemMaterial);
+                cannonMesh.position.set(worldPos.posX, itemY, worldPos.posZ);
+                cannonMesh.userData = { isCannonItem: true, gridX: pos.x, gridZ: pos.z };
+
+                scene.add(cannonMesh);
+                cannonItems.push(cannonMesh);
+                cannonPositions[pos.key] = cannonMesh;
+            } catch (error) {
+                console.warn("Could not find an empty tile to spawn cannon. Map is likely full.", error);
+            }
+        }
+
+        /**
+         * Initializes the game with the first two starting cannons.
+         */
+        function initializeCannons() {
+            placeSingleCannon(); // Cannon 1
+            placeSingleCannon(); // Cannon 2
+        }
+
+        /**
+         * Spawns two new cannons if the turn condition is met (every 5 player turns).
+         */
+        function trySpawnCannons() {
+            // Spawn new cannons every 5 player turns
+            if (totalTurns > 0 && totalTurns % 5 === 0) {
+                // Spawn 2 new cannons
+                placeSingleCannon();
+                placeSingleCannon();
+                messageElement.textContent = `!! REINFORCEMENTS! Two new Cannons have appeared on the grid. !!`;
+            }
+        }
+
+
+        /**
+         * Calculates valid movement tiles (Rook for both P1 and P2), blocked by units.
+         */
+        function getValidMoves(unit) {
+            const [startX, startZ] = unit.userData.currentTile;
+            const moves = [];
+            
+            // Rook Movement for both players: Horizontal/Vertical
+            const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]]; 
+
+            for (const [dx, dz] of directions) {
+                for (let i = 1; i < GRID_SIZE; i++) {
+                    const nextX = startX + dx * i;
+                    const nextZ = startZ + dz * i;
+
+                    const tile = getTileByCoords(nextX, nextZ);
+
+                    if (tile) {
+                        const isOccupied = occupiedTiles[`${nextX},${nextZ}`];
+                        
+                        if (isOccupied) {
+                            // Hit a unit, stop searching this direction
+                            break;
+                        } else {
+                            moves.push(tile);
+                        }
+                    } else {
+                        // Out of bounds
+                        break;
+                    }
+                }
+            }
+            return moves;
+        }
+
+
+        /**
+         * Calculates valid attack targets. Requires a cannon item.
+         * Attack range is anywhere on the grid (excluding self).
+         */
+        function getValidAttacks(unit) {
+            if (!unit.userData.hasCannon) {
+                return []; // Cannot attack without a cannon
+            }
+
+            const [startX, startZ] = unit.userData.currentTile;
+            const validTargetTiles = [];
+
+            // Full grid attack (anywhere except self)
+            tiles.forEach(tile => {
+                const gridX = tile.userData.gridX;
+                const gridZ = tile.userData.gridZ;
+                
+                // Do not target the unit's current tile
+                if (gridX === startX && gridZ === startZ) return;
+
+                validTargetTiles.push(tile);
+            });
+
+            return validTargetTiles;
+        }
+
+        /**
+         * Clears all movement highlights from the grid.
+         */
+        function clearHighlights() {
+            if (validTargetTiles.length > 0) {
+                validTargetTiles.forEach(tile => {
+                    if (tile.material.color.getHex() !== 0xffffff) { 
+                        tile.material.color.set(tile.userData.initialColor);
+                    }
+                });
+                validTargetTiles = [];
+            }
+        }
+
+        /**
+         * Applies the highlight color to specified tiles.
+         */
+        function highlightTargets(targets, color) {
+            clearHighlights();
+            validTargetTiles = targets;
+            targets.forEach(tile => {
+                tile.material.color.set(color);
+            });
+        }
+
+        /**
+         * Visually selects a unit and moves to the action choice phase.
+         * The unit is selected for the rest of the turn until End Turn is clicked.
+         */
+        function selectUnit(unit) {
+            // Deselect any previously selected unit
+            if (selectedUnitMaterial) {
+                selectedUnitMaterial.emissive.set(0x000000); 
+            }
+            clearHighlights();
+
+            selectedUnit = unit;
+            selectedUnitMaterial = unit.material;
+            selectedUnitMaterial.emissive.set(SELECTED_UNIT_EMISSIVE);
+            
+            // Go to the unified action choice phase
+            gamePhase = PHASE_ACTION_CHOICE;
+
+            updateControlVisibility(); 
+        }
+
+        /**
+         * Clears selection visuals and resets the phase if necessary.
+         */
+        function deselectUnit(resetPhase = true) {
+            if (selectedUnitMaterial) {
+                selectedUnitMaterial.emissive.set(0x000000); 
+            }
+            // Note: selectedUnit is NOT cleared here if resetPhase is false, 
+            // which is needed to maintain unit context during animations.
+            
+            if (resetPhase) {
+                selectedUnit = null;
+                selectedUnitMaterial = null;
+                gamePhase = PHASE_SELECT_UNIT;
+                updateControlVisibility(); 
+                if (!isAnimating) {
+                     const color = currentPlayer === 1 ? 'Red' : 'Blue';
+                     messageElement.textContent = `--- Player ${currentPlayer} (${color})'s turn! Select your unit. ---`;
+                }
+            }
+            clearHighlights();
+        }
+        
+        // --- Button Handlers ---
+
+        function onMoveSelectClick() {
+            // Check for the unified action choice phase and if Move hasn't been used
+            if (selectedUnit && gamePhase === PHASE_ACTION_CHOICE && !turnState.hasMoved) {
+                gamePhase = PHASE_MOVE_TARGET;
+                updateControlVisibility(); // Hides action buttons while targeting
+                const moves = getValidMoves(selectedUnit);
+                highlightTargets(moves, MOVE_HIGHLIGHT_COLOR);
+                messageElement.textContent = `MOVE: Click a highlighted tile to move. (${moves.length} valid targets)`;
+            }
+        }
+
+        function onAttackSelectClick() {
+            // Check for the unified action choice phase and if Attack hasn't been used
+            if (selectedUnit && gamePhase === PHASE_ACTION_CHOICE && !turnState.hasAttacked && selectedUnit.userData.hasCannon) {
+                gamePhase = PHASE_ATTACK_TARGET;
+                updateControlVisibility(); // Hides action buttons while targeting
+                const attacks = getValidAttacks(selectedUnit);
+                highlightTargets(attacks, ATTACK_HIGHLIGHT_COLOR); 
+                messageElement.textContent = `ATTACK: Click a highlighted tile to fire cannon. (${attacks.length} valid targets)`;
+            }
+        }
+
+        function onEndTurnClick() {
+            // Can end turn anytime we are in the action choice phase
+            if (selectedUnit && gamePhase === PHASE_ACTION_CHOICE) {
+                switchTurn();
+            }
+        }
+
+
+        // --- Core Game Actions ---
+
+        /**
+         * Executes the unit movement animation setup.
+         */
+        function moveUnit(unit, targetTile) {
+            isAnimating = true;
+            animationStartTime = performance.now();
+            unitToAnimate = unit;
+            deferredTargetTile = targetTile;
+
+            startPosition.copy(unit.position);
+            const { posX, posZ } = getTileWorldXZ(targetTile.userData.gridX, targetTile.userData.gridZ);
+            endPosition.set(posX, unit.position.y, posZ);
+            
+            // Clean up selection visuals only, keep selectedUnit state for re-selection later
+            deselectUnit(false); 
+            updateControlVisibility(); 
+
+            messageElement.textContent = `Player ${unit.userData.playerId} is moving...`;
+        }
+
+        /**
+         * Completes the state update after the move animation finishes.
+         */
+        function completeMove() {
+            const unit = unitToAnimate;
+            const targetTile = deferredTargetTile;
+
+            const [oldX, oldZ] = unit.userData.currentTile;
+            const newX = targetTile.userData.gridX;
+            const newZ = targetTile.userData.gridZ;
+            const newKey = `${newX},${newZ}`;
+            
+            let pickupMessage = ''; // Track if an item was picked up
+
+            // 1. Check for Cannon Pickup at the new location
+            if (!unit.userData.hasCannon) {
+                const pickedUpCannon = cannonPositions[newKey];
+                
+                if (pickedUpCannon) {
+                    unit.userData.hasCannon = true;
+                    scene.remove(pickedUpCannon);
+                    
+                    // Remove from tracking arrays
+                    delete cannonPositions[newKey];
+                    cannonItems = cannonItems.filter(item => item !== pickedUpCannon);
+                    
+                    pickupMessage = 'CANNON ACQUIRED! You can now use the Attack ability!';
+                }
+            }
+
+
+            // 2. Update Occupancy Tracking
+            delete occupiedTiles[`${oldX},${oldZ}`];
+            occupiedTiles[`${newX},${newZ}`] = unit;
+
+            // 3. Update Unit Data
+            unit.userData.currentTile = [newX, newZ];
+
+            // 4. Reset animation state
+            isAnimating = false;
+            unitToAnimate = null;
+            deferredTargetTile = null;
+            turnState.hasMoved = true; // IMPORTANT: Mark move as used
+            
+            // 5. Transition back to Action Choice Phase
+            gamePhase = PHASE_ACTION_CHOICE;
+            // Re-select the unit to show glow and update controls/message
+            selectUnit(unit); 
+            
+            // Override message if cannon was picked up
+            if (pickupMessage) {
+                messageElement.textContent = pickupMessage;
+            }
+        }
+
+        /**
+         * Executes game state changes after the cannon ball animation finishes.
+         */
+        function finalizeAttack() {
+            scene.remove(cannonBall);
+            cannonBall = null;
+            isAnimating = false;
+            turnState.hasAttacked = true; // IMPORTANT: Mark attack as used
+            
+            // NEW: Cannon is single-use, remove it after the attack
+            selectedUnit.userData.hasCannon = false;
+
+            const targetTile = cannonTargetTile;
+            const targetKey = `${targetTile.userData.gridX},${targetTile.userData.gridZ}`;
+            const targetUnit = occupiedTiles[targetKey];
+            
+            let outcomeMessage;
+            
+            // 1. Check for a hit and apply damage to opponent unit
+            if (targetUnit && targetUnit.userData.playerId !== currentPlayer) {
+                
+                targetUnit.userData.health -= DAMAGE_AMOUNT; 
+                const remainingHealth = targetUnit.userData.health;
+
+                if (remainingHealth <= 0) {
+                    targetUnit.userData.isAlive = false;
+                    scene.remove(targetUnit);
+                    allUnits = allUnits.filter(u => u !== targetUnit);
+                    delete occupiedTiles[targetKey];
+                    outcomeMessage = `CRITICAL HIT! Player ${targetUnit.userData.playerId} was destroyed! (Cannon Expended!)`;
+
+                    if (allUnits.length === 1) {
+                        updateHealthDisplay();
+                        messageElement.textContent = `GAME OVER! Player ${currentPlayer} wins!`;
+                        gamePhase = 'GAME_OVER'; 
+                        return; // End the game immediately
+                    }
+                } else {
+                    outcomeMessage = `HIT! Player ${targetUnit.userData.playerId} took ${DAMAGE_AMOUNT} damage! (${remainingHealth} HP left) (Cannon Expended!)`;
+                }
+            } else {
+                outcomeMessage = `MISS! The cannon blast hit empty ground at (${targetTile.userData.gridX}, ${targetTile.userData.gridZ}). (Cannon Expended!)`;
+            }
+            
+            targetTile.material.color.set(targetTile.userData.initialColor);
+            
+            messageElement.textContent = outcomeMessage;
+            updateHealthDisplay();
+            
+            // Return to the action choice phase.
+            gamePhase = PHASE_ACTION_CHOICE;
+            // Re-select the unit to update the glow, controls, and message
+            selectUnit(selectedUnit);
+        }
+
+
+        /**
+         * Initiates the cannon attack animation on a target tile.
+         */
+        function processAttack(targetTile) {
+            if (!selectedUnit) return;
+            
+            cannonStartPosition.copy(selectedUnit.position);
+            const { posX, posZ } = getTileWorldXZ(targetTile.userData.gridX, targetTile.userData.gridZ);
+            cannonEndPosition.set(posX, TILE_HEIGHT / 2, posZ); 
+
+            // Clean up visual state and disable controls
+            deselectUnit(false); 
+            clearHighlights();
+            updateControlVisibility(); 
+            
+            isAnimating = true;
+            cannonStartTime = performance.now();
+            cannonTargetTile = targetTile;
+            
+            const ballGeometry = new THREE.SphereGeometry(CANNON_BALL_RADIUS, 8, 8);
+            const ballMaterial = new THREE.MeshLambertMaterial({ color: CANNON_COLOR });
+            cannonBall = new THREE.Mesh(ballGeometry, ballMaterial);
+            cannonBall.position.copy(cannonStartPosition);
+            scene.add(cannonBall);
+
+            messageElement.textContent = `Player ${currentPlayer} firing cannon...`;
+        }
+
+
+        /**
+         * Switches the active player's turn and resets the phase/turn state.
+         */
+        function switchTurn() {
+            // NEW: Always increment the total turn count (one player turn)
+            totalTurns++; 
+
+            // NEW: Check for cannon spawn condition every 5 turns
+            trySpawnCannons();
+
+            currentPlayer = currentPlayer === 1 ? 2 : 1;
+            const color = currentPlayer === 1 ? 'Red' : 'Blue';
+            
+            // Reset turn state for the new player
+            turnState.hasMoved = false;
+            turnState.hasAttacked = false;
+
+            deselectUnit(true); // Reset phase fully and clear selectedUnit
+            
+            updateControlVisibility(); 
+            updateHealthDisplay();
+            
+            if (!isAnimating) {
+                messageElement.textContent = `--- Player ${currentPlayer} (${color})'s turn! (Turn ${totalTurns + 1}) Select your unit. ---`;
+            }
+        }
+
+        /**
+         * Handles mouse/pointer movement for hover effects.
+         */
+        function onPointerMove(event) {
+            pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        }
+
+        /**
+         * Handles game interactions (unit selection, movement, attack targeting).
+         */
+        function onPointerClick() {
+            if (isAnimating || gamePhase === 'GAME_OVER') return;
+
+            raycaster.setFromCamera(pointer, camera);
+            const intersectsUnits = raycaster.intersectObjects(allUnits);
+            const intersectsTiles = raycaster.intersectObjects(tiles);
+
+            switch (gamePhase) {
+                case PHASE_SELECT_UNIT:
+                    if (intersectsUnits.length > 0) {
+                        const clickedUnit = intersectsUnits[0].object;
+                        if (clickedUnit.userData.playerId === currentPlayer) {
+                            selectUnit(clickedUnit); // Transitions to ACTION_CHOICE phase
+                        } else {
+                            messageElement.textContent = `It is Player ${currentPlayer}'s turn. Select your unit.`;
+                        }
+                    }
+                    break;
+
+                case PHASE_MOVE_TARGET:
+                    if (intersectsTiles.length > 0) {
+                        const clickedTile = intersectsTiles[0].object;
+                        if (validTargetTiles.includes(clickedTile)) {
+                            moveUnit(selectedUnit, clickedTile); // Starts animation, returns to ACTION_CHOICE upon completion
+                        } else {
+                            // Invalid click, revert to Action choice phase
+                            gamePhase = PHASE_ACTION_CHOICE;
+                            clearHighlights();
+                            updateControlVisibility();
+                            selectUnit(selectedUnit); // Re-select to show controls
+                            messageElement.textContent = `Move selection cancelled/invalid. Choose Move, Attack, or End Turn.`;
+                        }
+                    } else {
+                         // Clicked outside, revert to Action choice phase
+                         gamePhase = PHASE_ACTION_CHOICE;
+                         clearHighlights();
+                         updateControlVisibility();
+                         selectUnit(selectedUnit); // Re-select to show controls
+                         messageElement.textContent = `Move selection cancelled/invalid. Choose Move, Attack, or End Turn.`;
+                    }
+                    break;
+
+                case PHASE_ATTACK_TARGET:
+                    if (intersectsTiles.length > 0) {
+                        const clickedTile = intersectsTiles[0].object;
+                        if (validTargetTiles.includes(clickedTile)) {
+                            processAttack(clickedTile); // Starts animation, completes attack and returns to ACTION_CHOICE
+                        } else {
+                            // Invalid click, revert to Action choice phase
+                            gamePhase = PHASE_ACTION_CHOICE;
+                            clearHighlights();
+                            updateControlVisibility();
+                            selectUnit(selectedUnit); // Re-select to show controls
+                            messageElement.textContent = `Attack selection cancelled/invalid. Choose Move, Attack, or End Turn.`;
+                        }
+                    } else {
+                         // Clicked outside, revert to Action choice phase
+                         gamePhase = PHASE_ACTION_CHOICE;
+                         clearHighlights();
+                         updateControlVisibility();
+                         selectUnit(selectedUnit); // Re-select to show controls
+                         messageElement.textContent = `Attack selection cancelled/invalid. Choose Move, Attack, or End Turn.`;
+                    }
+                    break;
+            }
+        }
+
+        /**
+         * Main animation loop. Runs every frame.
+         */
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // 0. Handle Cannon Ball Animation
+            if (cannonBall) {
+                const elapsedTime = time - cannonStartTime;
+                const progress = Math.min(elapsedTime / CANNON_DURATION, 1);
+                
+                cannonBall.position.lerpVectors(cannonStartPosition, cannonEndPosition, progress);
+                const arcY = CANNON_ARC_HEIGHT * 4 * progress * (1 - progress);
+                cannonBall.position.y = TILE_HEIGHT / 2 + arcY; 
+
+                if (progress >= 1) {
+                    finalizeAttack();
+                    // Game flow returns to PHASE_ACTION_CHOICE here
+                }
+            }
+
+            // 1. Handle Unit Movement Animation
+            if (isAnimating && unitToAnimate && !cannonBall) { 
+                const elapsedTime = time - animationStartTime;
+                const progress = Math.min(elapsedTime / MOVEMENT_DURATION, 1);
+                
+                unitToAnimate.position.lerpVectors(startPosition, endPosition, progress);
+
+                if (progress >= 1) {
+                    completeMove();
+                    // Game flow returns to PHASE_ACTION_CHOICE here
+                }
+            }
+            
+            // 2. Unit Spinning
+            if (player1 && player1.userData.isAlive) player1.rotation.y += 0.02;
+            if (player2 && player2.userData.isAlive) player2.rotation.y += 0.02;
+
+            // 3. Raycast for Hovering
+            if (!isAnimating) {
+                raycaster.setFromCamera(pointer, camera);
+                // Check tiles and all active cannon items
+                const intersectableObjects = [...tiles, ...cannonItems];
+                const intersects = raycaster.intersectObjects(intersectableObjects.filter(Boolean)); 
+
+                if (hoveredTile) {
+                    // Check if the tile is still a valid target (prevents un-highlighting valid move/attack targets)
+                    if (!validTargetTiles.includes(hoveredTile) && hoveredTile.userData.isTile) {
+                        hoveredTile.material.color.set(hoveredTile.userData.initialColor);
+                    }
+                    hoveredTile = null;
+                }
+
+                if (intersects.length > 0) {
+                    const intersectedObject = intersects[0].object;
+                    if (intersectedObject.userData.isTile) {
+                        const newHoveredTile = intersectedObject;
+                        // Only apply hover if we are not actively targeting
+                        if (gamePhase === PHASE_SELECT_UNIT || gamePhase === PHASE_ACTION_CHOICE) {
+                             newHoveredTile.material.color.set(HOVER_COLOR);
+                        }
+                        hoveredTile = newHoveredTile;
+                    }
+                }
+            }
+            // 4. Render Update
+            renderer.render(scene, camera);
+        }
+
+        /**
+         * Handles window resizing.
+         */
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+
+            camera.left = ISOMETRIC_FRUSTUM_SIZE * aspect / -2;
+            camera.right = ISOMETRIC_FRUSTUM_SIZE * aspect / 2;
+            camera.top = ISOMETRIC_FRUSTUM_SIZE / 2;
+            camera.bottom = ISOMETRIC_FRUSTUM_SIZE / -2;
+
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Start the application when the window loads
+        window.onload = function () {
+            try {
+                init();
+                requestAnimationFrame(animate); 
+            } catch (e) {
+                console.error("An error occurred during Three.js initialization:", e);
+                document.getElementById('message').textContent = "Error: Could not start 3D engine. Check console for details.";
+            }
+        };
+    </script>
+</body>
 </html>
+
